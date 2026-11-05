@@ -33,7 +33,7 @@ jobs:
 
     permissions:
       contents: read
-      
+
     steps:
 
       # Checkout source code
@@ -68,7 +68,7 @@ jobs:
           set -euo pipefail
           npm test
 
-      # Configure AWS credentials using OIDC
+      # Configure AWS credentials
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -183,12 +183,13 @@ jobs:
       - name: Checkout source code
         uses: actions/checkout@v4
 
-      # Configure AWS credentials using OIDC
+      # Configure AWS credentials 
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_GITHUB_ACTIONS_ROLE_ARN }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
       # Verify required tools
