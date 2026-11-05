@@ -1,0 +1,19 @@
+replicaCount: 2
+
+image:
+  repository: 635930436969.dkr.ecr.ap-south-1.amazonaws.com/devops-assessment-app
+  tag: latest
+  pullPolicy: Always
+
+imagePullSecrets:
+  - name: ecr-registry-secret
+
+service:
+  type: NodePort
+  port: 3000
+  targetPort: 3000
+
+containerPort: 3000
+
+healthCheck:
+  path: /health

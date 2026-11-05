@@ -1,0 +1,326 @@
+
+name: DevOps Assessment CI/CD
+
+on:
+  push:
+    branches:
+      - main
+
+  workflow_dispatch:
+
+# Prevent overlapping deployments
+concurrency:
+  group: devops-assessment-pipeline
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ap-south-1
+  AWS_ACCOUNT_ID: "635930436969"
+  ECR_REGISTRY: 635930436969.dkr.ecr.ap-south-1.amazonaws.com
+  ECR_REPOSITORY: devops-assessment-app
+
+jobs:
+
+  # CI: TEST, BUILD AND PUSH DOCKER IMAGE
+  
+  build-and-push:
+
+    name: CI - Test, Build and Push to ECR
+
+    runs-on: ubuntu-latest
+
+    timeout-minutes: 20
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+
+      # Checkout source code
+
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      # Setup Node.js
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: task-1-cicd/app/package-lock.json
+
+      # Install dependencies
+
+      - name: Install dependencies
+        working-directory: task-1-cicd/app
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci
+
+      # Run application tests
+
+      - name: Run application tests
+        working-directory: task-1-cicd/app
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm test
+
+      # Configure AWS credentials using OIDC
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_GITHUB_ACTIONS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Check whether ECR repository exists
+
+      - name: Check or create ECR repository
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          echo "Checking ECR repository..."
+
+          if aws ecr describe-repositories \
+            --repository-names "$ECR_REPOSITORY" \
+            --region "$AWS_REGION" \
+            >/dev/null 2>ecr-error.log; then
+
+            echo "ECR repository already exists."
+            echo "Skipping repository creation."
+
+          else
+
+            if grep -q "RepositoryNotFoundException" ecr-error.log; then
+
+              echo "ECR repository does not exist."
+              echo "Creating repository..."
+
+              aws ecr create-repository \
+                --repository-name "$ECR_REPOSITORY" \
+                --image-scanning-configuration scanOnPush=true \
+                --encryption-configuration encryptionType=AES256 \
+                --region "$AWS_REGION"
+
+              echo "ECR repository created successfully."
+
+            else
+
+              cat ecr-error.log >&2
+              echo "Unable to check ECR repository." >&2
+              exit 1
+
+            fi
+
+          fi
+
+          rm -f ecr-error.log
+
+      # Login to Amazon ECR
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # Build Docker image
+
+      - name: Build Docker image
+        shell: bash
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          IMAGE="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+          echo "Building Docker image: $IMAGE"
+
+          docker build \
+            --pull \
+            --tag "$IMAGE" \
+            ./task-1-cicd
+
+      # Push Docker image to ECR
+
+      - name: Push Docker image to ECR
+        shell: bash
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          IMAGE="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+
+          echo "Pushing Docker image: $IMAGE"
+
+          docker push "$IMAGE"
+
+          echo "Docker image pushed successfully."
+
+  # CD: DEPLOY APPLICATION USING HELM
+
+  deploy-to-kubernetes:
+
+    name: CD - Deploy using Helm
+
+    needs: build-and-push
+
+    runs-on: [self-hosted, Windows, X64]
+
+    timeout-minutes: 20
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+
+      # Checkout source code
+
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      # Configure AWS credentials using OIDC
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_GITHUB_ACTIONS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Verify required tools
+
+      - name: Verify required tools
+        shell: pwsh
+        run: |
+          $tools = @("aws", "kubectl", "helm", "minikube")
+
+          foreach ($tool in $tools) {
+
+            if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
+              throw "$tool is not installed or not available in PATH."
+            }
+
+            Write-Host "$tool is available."
+          }
+
+      # Verify Minikube connection
+
+      - name: Verify Kubernetes connection
+        shell: pwsh
+        run: |
+          minikube status
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Minikube is not running."
+          }
+
+          kubectl config use-context minikube
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to select Minikube context."
+          }
+
+          kubectl get nodes
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to connect to Kubernetes cluster."
+          }
+
+      # Create or update ECR image pull secret
+
+      - name: Create or update ECR pull secret
+        shell: pwsh
+        run: |
+          $password = aws ecr get-login-password --region $env:AWS_REGION
+
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($password)) {
+            throw "Unable to authenticate with ECR."
+          }
+
+          $secretYaml = & kubectl create secret docker-registry ecr-registry-secret `
+            --docker-server=$env:ECR_REGISTRY `
+            --docker-username=AWS `
+            --docker-password="$password" `
+            --dry-run=client -o yaml
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to generate ECR pull secret."
+          }
+
+          $secretYaml | & kubectl apply -f -
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to create or update ECR pull secret."
+          }
+
+          Remove-Variable password
+          Remove-Variable secretYaml
+
+          Write-Host "ECR pull secret is ready."
+
+      # Validate Helm chart
+
+      - name: Validate Helm chart
+        shell: pwsh
+        run: |
+          helm lint ./helm/devops-assessment
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Helm chart validation failed."
+          }
+
+      # Deploy application using Helm
+
+      - name: Deploy application using Helm
+        shell: pwsh
+        env:
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          $image = "$env:ECR_REGISTRY/$env:ECR_REPOSITORY`:$env:IMAGE_TAG"
+
+          Write-Host "Deploying image: $image"
+
+          helm upgrade --install devops-assessment `
+            ./helm/devops-assessment `
+            --namespace default `
+            --set-string image.tag=$env:IMAGE_TAG `
+            --wait `
+            --timeout 180s
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Helm deployment failed."
+          }
+
+      # Kubernetes deployment
+
+      - name: Verify Kubernetes deployment
+        shell: pwsh
+        run: |
+          kubectl rollout status deployment/devops-assessment `
+            --namespace default `
+            --timeout=180s
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Kubernetes rollout failed."
+          }
+
+          Write-Host "Deployment verification successful."
+
+          kubectl get deployments
+          kubectl get pods
+          kubectl get services
+
+      # Helm release
+      - name: Verify Helm release
+        shell: pwsh
+        run: |
+          helm status devops-assessment --namespace default
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Unable to verify Helm release."
+          }
