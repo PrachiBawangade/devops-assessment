@@ -164,27 +164,25 @@ jobs:
   # CD: DEPLOY APPLICATION USING HELM
 
   deploy-to-kubernetes:
-
     name: CD - Deploy using Helm
-
     needs: build-and-push
-
     runs-on: [self-hosted, Windows, X64]
-
     timeout-minutes: 20
 
     permissions:
       contents: read
 
+    defaults:
+      run:
+        shell: bash
+
     steps:
 
       # Checkout source code
-
       - name: Checkout source code
         uses: actions/checkout@v4
 
-      # Configure AWS credentials 
-
+      # Configure AWS credentials
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -193,134 +191,102 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       # Verify required tools
-
       - name: Verify required tools
-        shell: pwsh
         run: |
-          $tools = @("aws", "kubectl", "helm", "minikube")
+          set -euo pipefail
 
-          foreach ($tool in $tools) {
+          for tool in aws kubectl helm minikube; do
+            if ! command -v "$tool" >/dev/null 2>&1; then
+              echo "ERROR: $tool is not installed or not available in PATH."
+              exit 1
+            fi
 
-            if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
-              throw "$tool is not installed or not available in PATH."
-            }
-
-            Write-Host "$tool is available."
-          }
+            echo "$tool is available."
+          done
 
       # Verify Minikube connection
-
       - name: Verify Kubernetes connection
-        shell: pwsh
         run: |
+          set -euo pipefail
+
           minikube status
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "Minikube is not running."
-          }
-
           kubectl config use-context minikube
-
-          if ($LASTEXITCODE -ne 0) {
-            throw "Unable to select Minikube context."
-          }
-
           kubectl get nodes
 
-          if ($LASTEXITCODE -ne 0) {
-            throw "Unable to connect to Kubernetes cluster."
-          }
+          echo "Kubernetes connection verified."
 
       # Create or update ECR image pull secret
-
       - name: Create or update ECR pull secret
-        shell: pwsh
         run: |
-          $password = aws ecr get-login-password --region $env:AWS_REGION
+          set -euo pipefail
 
-          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($password)) {
-            throw "Unable to authenticate with ECR."
-          }
+          PASSWORD=$(aws ecr get-login-password --region "$AWS_REGION")
 
-          $secretYaml = & kubectl create secret docker-registry ecr-registry-secret `
-            --docker-server=$env:ECR_REGISTRY `
-            --docker-username=AWS `
-            --docker-password="$password" `
-            --dry-run=client -o yaml
+          if [ -z "$PASSWORD" ]; then
+            echo "ERROR: Unable to authenticate with ECR."
+            exit 1
+          fi
 
-          if ($LASTEXITCODE -ne 0) {
-            throw "Unable to generate ECR pull secret."
-          }
+          kubectl create secret docker-registry ecr-registry-secret \
+            --docker-server="$ECR_REGISTRY" \
+            --docker-username=AWS \
+            --docker-password="$PASSWORD" \
+            --dry-run=client -o yaml |
+          kubectl apply -f -
 
-          $secretYaml | & kubectl apply -f -
+          unset PASSWORD
 
-          if ($LASTEXITCODE -ne 0) {
-            throw "Unable to create or update ECR pull secret."
-          }
-
-          Remove-Variable password
-          Remove-Variable secretYaml
-
-          Write-Host "ECR pull secret is ready."
+          echo "ECR pull secret is ready."
 
       # Validate Helm chart
-
       - name: Validate Helm chart
-        shell: pwsh
         run: |
+          set -euo pipefail
+
           helm lint ./helm/devops-assessment
 
-          if ($LASTEXITCODE -ne 0) {
-            throw "Helm chart validation failed."
-          }
+          echo "Helm chart validation successful."
 
       # Deploy application using Helm
-
       - name: Deploy application using Helm
-        shell: pwsh
         env:
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          $image = "$env:ECR_REGISTRY/$env:ECR_REPOSITORY`:$env:IMAGE_TAG"
+          set -euo pipefail
 
-          Write-Host "Deploying image: $image"
+          IMAGE="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
 
-          helm upgrade --install devops-assessment `
-            ./helm/devops-assessment `
-            --namespace default `
-            --set-string image.tag=$env:IMAGE_TAG `
-            --wait `
+          echo "Deploying image: $IMAGE"
+
+          helm upgrade --install devops-assessment \
+            ./helm/devops-assessment \
+            --namespace default \
+            --set-string image.tag="$IMAGE_TAG" \
+            --wait \
             --timeout 180s
 
-          if ($LASTEXITCODE -ne 0) {
-            throw "Helm deployment failed."
-          }
+          echo "Helm deployment completed."
 
-      # Kubernetes deployment
-
+      # Verify Kubernetes deployment
       - name: Verify Kubernetes deployment
-        shell: pwsh
         run: |
-          kubectl rollout status deployment/devops-assessment `
-            --namespace default `
+          set -euo pipefail
+
+          kubectl rollout status deployment/devops-assessment \
+            --namespace default \
             --timeout=180s
 
-          if ($LASTEXITCODE -ne 0) {
-            throw "Kubernetes rollout failed."
-          }
-
-          Write-Host "Deployment verification successful."
+          echo "Deployment verification successful."
 
           kubectl get deployments
           kubectl get pods
           kubectl get services
 
-      # Helm release
+      # Verify Helm release
       - name: Verify Helm release
-        shell: pwsh
         run: |
+          set -euo pipefail
+
           helm status devops-assessment --namespace default
 
-          if ($LASTEXITCODE -ne 0) {
-            throw "Unable to verify Helm release."
-          }
+          echo "Helm release verified successfully."
