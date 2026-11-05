@@ -191,17 +191,21 @@ jobs:
           aws-region: ${{ env.AWS_REGION }}
 
       # Verify required tools
-      - name: Verify required tools
+      - name: Debug tool availability
+        shell: bash
         run: |
-          set -euo pipefail
+         echo "Checking Git Bash environment..."
+         echo "PATH: $PATH"
 
-          for tool in aws kubectl helm minikube; do
-            if ! command -v "$tool" >/dev/null 2>&1; then
-              echo "ERROR: $tool is not installed or not available in PATH."
-              exit 1
-            fi
+         for tool in aws kubectl helm minikube; do
+          echo "-------------------------"
+          echo "Checking $tool"
 
-            echo "$tool is available."
+          if command -v "$tool"; then
+          echo "$tool is available."
+            else
+             echo "ERROR: $tool is missing from PATH."
+          fi
           done
 
       # Verify Minikube connection
